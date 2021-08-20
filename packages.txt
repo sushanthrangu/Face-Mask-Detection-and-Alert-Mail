@@ -1,0 +1,15 @@
+pip install tensorflow==1.15.0 ( enter ) 
+ 
+pip install scikit-learn==0.22.1 
+ 
+pip install keras==2.2.4
+
+pip install h5py==2.10.0
+ 
+pip install pandas
+ 
+pip install matplotlib
+ 
+pip install opencv-contrib-python
+
+pip install imutils
