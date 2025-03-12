@@ -1,29 +1,45 @@
 import smtplib
 
 def sendmail(msg):
-    TO = " "
+    TO = "rangusushanth31@gmail.com"
     SUBJECT = 'No Mask'
-    TEXT =" Person With out mask"
-     
-    print(TEXT)
-    # Gmail Sign In
-    gmail_sender = "jayaram4241@gmail.com"
-    gmail_passwd = "jayaram123"
+    TEXT = msg
 
-    server = smtplib.SMTP('smtp.gmail.com', 587)
-    server.ehlo()
-    server.starttls()
-    server.login(gmail_sender, gmail_passwd)
+    print(f"Sending email: {TEXT}")
+    gmail_sender = "facemaskdetection25@gmail.com"
+    gmail_passwd = "efmr knov fors fghk"
 
-    BODY = '\r\n'.join(['To: %s' % TO,
-                        'From: %s' % gmail_sender,
-                        'Subject: %s' % SUBJECT,
-                        '', TEXT])
-
+    server = None
     try:
+        # Use SSL connection
+        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
+        server.ehlo()
+        
+        # Debug: Verify connection
+        print("Server connected:", server.noop()[0])
+        
+        # Login with credentials
+        server.login(gmail_sender, gmail_passwd)
+        
+        # Construct email
+        BODY = '\r\n'.join([
+            f'To: {TO}',
+            f'From: {gmail_sender}',
+            f'Subject: {SUBJECT}',
+            '', 
+            TEXT
+        ])
+        
         server.sendmail(gmail_sender, [TO], BODY)
-        print ('email sent')
-    except:
-        print ('error sending mail')
+        print('Email sent')
+        
+    except Exception as e:
+        print(f'ERROR: {str(e)}')
+        # Add more specific error handling here
+    finally:
+        if server:
+            try:
+                server.quit()
+            except Exception as e:
+                print(f"Cleanup error: {e}")
 
-    server.quit()

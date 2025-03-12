@@ -1,7 +1,12 @@
 # USAGE
 # python detect_mask_video.py
 
-# import the necessary packages
+# Import packages
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress TensorFlow logging
+import tensorflow as tf
+tf.get_logger().setLevel('ERROR')
+
 from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
 from tensorflow.keras.preprocessing.image import img_to_array
 from tensorflow.keras.models import load_model
@@ -11,144 +16,176 @@ import argparse
 import imutils
 import time
 import cv2
-import os
 from sendmail import *
+
+# Global variables for alert management
+ALERT_SENT = False
+NO_MASK_FRAMES = 0
+REQUIRED_CONSECUTIVE_FRAMES = 5  # 5 consecutive no-mask frames
+COOLDOWN_SECONDS = 300            # 5 minutes between alerts
+LAST_ALERT_TIME = 0
+
 def detect_and_predict_mask(frame, faceNet, maskNet):
-	# grab the dimensions of the frame and then construct a blob
-	# from it
-	(h, w) = frame.shape[:2]
-	blob = cv2.dnn.blobFromImage(frame, 1.0, (400, 400),
-		(140.0, 250.0, 150.0))
+    (h, w) = frame.shape[:2]
+    blob = cv2.dnn.blobFromImage(frame, 1.0, (300, 300),
+                                 (104.0, 177.0, 123.0))  # Correct mean subtraction
+    
+    faceNet.setInput(blob)
+    detections = faceNet.forward()
 
-	# pass the blob through the network and obtain the face detections
-	faceNet.setInput(blob)
-	detections = faceNet.forward()
+    faces = []
+    locs = []
+    preds = []
 
-	# initialize our list of faces, their corresponding locations,
-	# and the list of predictions from our face mask network
-	faces = []
-	locs = []
-	preds = []
+    for i in range(0, detections.shape[2]):
+        confidence = detections[0, 0, i, 2]
 
-	# loop over the detections
-	for i in range(0, detections.shape[2]):
-		# extract the confidence (i.e., probability) associated with
-		# the detection
-		confidence = detections[0, 0, i, 2]
+        if confidence > args["confidence"]:
+            box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+            (startX, startY, endX, endY) = box.astype("int")
 
-		# filter out weak detections by ensuring the confidence is
-		# greater than the minimum confidence
-		if confidence > args["confidence"]:
-			# compute the (x, y)-coordinates of the bounding box for
-			# the object
-			box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-			(startX, startY, endX, endY) = box.astype("int")
+            # Ensure valid face coordinates
+            (startX, startY) = (max(0, startX), max(0, startY))
+            (endX, endY) = (min(w-1, endX), min(h-1, endY))
+            
+            # Skip invalid face regions
+            if endX <= startX or endY <= startY:
+                continue
 
-			# ensure the bounding boxes fall within the dimensions of
-			# the frame
-			(startX, startY) = (max(0, startX), max(0, startY))
-			(endX, endY) = (min(w - 1, endX), min(h - 1, endY))
+            face = frame[startY:endY, startX:endX]
+            if face.size == 0:  # Check for empty face ROI
+                continue
 
-			# extract the face ROI, convert it from BGR to RGB channel
-			# ordering, resize it to 224x224, and preprocess it
-			face = frame[startY:endY, startX:endX]
-			face = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-			face = cv2.resize(face, (224, 224))
-			face = img_to_array(face)
-			face = preprocess_input(face)
+            face = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
+            face = cv2.resize(face, (224, 224))
+            face = img_to_array(face)
+            face = preprocess_input(face)
+            faces.append(face)
+            locs.append((startX, startY, endX, endY))
 
-			# add the face and bounding boxes to their respective
-			# lists
-			faces.append(face)
-			locs.append((startX, startY, endX, endY))
+    if len(faces) > 0:
+        faces = np.array(faces, dtype="float32")
+        # Only predict if valid faces exist
+        if faces.shape[0] > 0:
+            preds = maskNet.predict(faces, batch_size=32, verbose=0)
+        else:
+            preds = []
+    else:
+        preds = []
 
-	# only make a predictions if at least one face was detected
-	if len(faces) > 0:
-		# for faster inference we'll make batch predictions on *all*
-		# faces at the same time rather than one-by-one predictions
-		# in the above `for` loop
-		faces = np.array(faces, dtype="float32")
-		preds = maskNet.predict(faces, batch_size=32)
+    return (locs, preds)
 
-	# return a 2-tuple of the face locations and their corresponding
-	# locations
-	return (locs, preds)
-
-# construct the argument parser and parse the arguments
+# Argument parsing
 ap = argparse.ArgumentParser()
-ap.add_argument("-f", "--face", type=str,
-	default="face_detector",
-	help="path to face detector model directory")
-ap.add_argument("-m", "--model", type=str,
-	default="mask_detector.model",
-	help="path to trained face mask detector model")
+ap.add_argument("-f", "--face", type=str, default="face_detector",
+                help="path to face detector model directory")
+ap.add_argument("-m", "--model", type=str, default="mask_detector.model",
+                help="path to trained face mask detector model")
 ap.add_argument("-c", "--confidence", type=float, default=0.5,
-	help="minimum probability to filter weak detections")
+                help="minimum probability to filter weak detections")
 args = vars(ap.parse_args())
 
-# load our serialized face detector model from disk
+# Load face detector model
 print("[INFO] loading face detector model...")
 prototxtPath = os.path.sep.join([args["face"], "deploy.prototxt"])
-weightsPath = os.path.sep.join([args["face"],
-	"res10_300x300_ssd_iter_140000.caffemodel"])
+weightsPath = os.path.sep.join([args["face"], 
+                               "res10_300x300_ssd_iter_140000.caffemodel"])
 faceNet = cv2.dnn.readNet(prototxtPath, weightsPath)
 
-# load the face mask detector model from disk
+# Load mask detector model
 print("[INFO] loading face mask detector model...")
 maskNet = load_model(args["model"])
 
-# initialize the video stream and allow the camera sensor to warm up
+# Initialize video stream
 print("[INFO] starting video stream...")
 vs = VideoStream(src=0).start()
-time.sleep(2.0)
+time.sleep(2.0)  # Camera warm-up
+
+
+
+
+# Add these state variables before the main loop
+
+
+# ... (keep all existing code until the main while loop)
 
 # loop over the frames from the video stream
+
+ALERT_SENT = False
+NO_MASK_FRAMES = 0
+last_alert_time = 0
+
+# Then in your loop:
+def main():
+    global ALERT_SENT, NO_MASK_FRAMES, last_alert_time
+
 while True:
-	# grab the frame from the threaded video stream and resize it
-	# to have a maximum width of 400 pixels
-	frame = vs.read()
-	frame = imutils.resize(frame, width=500)
+   
+    
+    frame = vs.read()
+    frame = imutils.resize(frame, width=500)
+    current_time = time.time()
 
-	# detect faces in the frame and determine if they are wearing a
-	# face mask or not
-	(locs, preds) = detect_and_predict_mask(frame, faceNet, maskNet)
+    (locs, preds) = detect_and_predict_mask(frame, faceNet, maskNet)
+    
+    # Initialize frame-wide alert status
+    any_no_mask = False
 
-	# loop over the detected face locations and their corresponding
-	# locations
-	for (box, pred) in zip(locs, preds):
-		# unpack the bounding box and predictions
-		(startX, startY, endX, endY) = box
-		(mask, withoutMask) = pred
+    for (box, pred) in zip(locs, preds):
+        (startX, startY, endX, endY) = box
+        (mask, withoutMask) = pred
 
-		# determine the class label and color we'll use to draw
-		# the bounding box and text
-		#label = "Mask" if mask > withoutMask else "No Mask"
-		#color = (0, 255, 0) if label == "Mask" else (0, 0, 255)
-		if mask > withoutMask:
-			label ="Mask"
-			color = (0, 255, 0) 
-		else:
-			label="No Mask"
-			sendmail("This person has no mask")
-			color = (0, 0, 255)
+        if mask > withoutMask:
+            label = "Mask"
+            color = (0, 255, 0)
+        else:
+            label = "No Mask"
+            color = (0, 0, 255)
+            any_no_mask = True  # At least one person without mask
 
-		# include the probability in the label
-		label = "{}: {:.2f}%".format(label, max(mask, withoutMask) * 100)
+        label = "{}: {:.2f}%".format(label, max(mask, withoutMask) * 100)
 
-		# display the label and bounding box rectangle on the output
-		# frame
-		cv2.putText(frame, label, (startX, startY - 10),
-			cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 2)
-		cv2.rectangle(frame, (startX, startY), (endX, endY), color, 2)
+        cv2.putText(frame, label, (startX, startY - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 2)
+        cv2.rectangle(frame, (startX, startY), (endX, endY), color, 2)
 
-	# show the output frame
-	cv2.imshow("Frame", frame)
-	key = cv2.waitKey(1) & 0xFF
+    # Email alert logic
+    if any_no_mask:
+        NO_MASK_FRAMES += 1
+        # Send email only if:
+        # - Haven't sent alert yet
+        # - Met consecutive frame threshold
+        # - Cooldown period has passed
+        if (not ALERT_SENT and 
+            NO_MASK_FRAMES >= REQUIRED_CONSECUTIVE_FRAMES and
+            (current_time - last_alert_time) > COOLDOWN_SECONDS):
+            
+            sendmail("Person without mask detected continuously for {} frames".format(
+                REQUIRED_CONSECUTIVE_FRAMES))
+            ALERT_SENT = True
+            last_alert_time = current_time
+    else:
+        # Reset counters when everyone has masks
+        NO_MASK_FRAMES = 0
+        ALERT_SENT = False  # Reset for new detections
 
-	# if the `q` key was pressed, break from the loop
-	if key == ord("q"):
-		break
+    cv2.imshow("Frame", frame)
+    key = cv2.waitKey(1) & 0xFF
+
+    if key == ord("q"):
+        break
+
+# ... (keep cleanup code)
 
 # do a bit of cleanup
-cv2.destroyAllWindows()
-vs.stop()
+try:
+    # Your existing video processing loop
+    while True:
+        # Your code for video processing and detecting masks
+        # If a person doesn't wear a mask, the sendmail function will be called
+        sendmail("This person has no mask")
+except KeyboardInterrupt:
+    print("Program interrupted. Exiting...")
+finally:
+    cv2.destroyAllWindows()
+    vs.stop()
